@@ -107,55 +107,42 @@ namespace Akka.PersistentBackoff {
         
         protected override bool ReceiveRecover(object message) {
             BufferState state;
-            if (message is SnapshotOffer &&
-                (state = ((SnapshotOffer) message).Snapshot as BufferState) != null) {
-                State = state;
-            }
-            else if (message is RecoveryCompleted) {
-                FlushBuffer();
-            }
-            else return false;
-            return true;
+            return message.Match()
+                .With<SnapshotOffer>(offer => {
+                    if ((state = ((SnapshotOffer) message).Snapshot as BufferState) != null)
+                        State = state;
+                })
+                .With<RecoveryCompleted>(FlushBuffer)
+                .WasHandled;
         }
 
         protected override bool ReceiveCommand(object message) {
-            if (message is SaveSnapshotSuccess)
-                return false;
-
-            if (message is SaveSnapshotFailure) {
-                var failure = (SaveSnapshotFailure) message;
-                Context.GetLogger().Error("Error storing snapshot: {0}", failure.Cause.GetBaseException().Message);
-                return false;
-            }
-            if (message is Tick) {
-                FlushBuffer();
-                return true;
-            } else if (message is Terminated)
-            {
-                var terminated = (Terminated)message;
-                if (_child != null && _child.Equals(terminated.ActorRef))
-                {
-                    //restart and schedule a retry according to the backoff algorithm
-                    _child = Context.Watch(Context.ActorOf(_childProps, _childName));
-                    ScheduleRetry();
-                }
-                return true;
-            } else if (message is PersistentBackoffProtocol.Sent)
-            {
-                //ack of monitored actor. Remove succesfull message and reset the backoff
-                UnMonitorMessage((PersistentBackoffProtocol.Sent)message);
-                backoff.Reset();
-                return true;
-            } else if (message is GetCurrentChild)
-            {
-                Sender.Tell(new CurrentChild(_child));
-                return true;
-            }
-
-            var trackedMsg = MonitorMessage(message, Sender);
-            if (!backoff.IsStarted()) _child.Forward(trackedMsg);
-            if (backoff.IsStarted() && retryScheduled == false) ScheduleRetry();
-            return true;
+            return message.Match()
+                .With<SaveSnapshotSuccess>(() => 
+                    { })
+                .With<SaveSnapshotFailure>((failure) => 
+                    Context.GetLogger().Error("Error storing snapshot: {0}", failure.Cause.GetBaseException().Message))
+                .With<Tick>(FlushBuffer)
+                .With<Terminated>(terminated => {
+                    if (_child != null && _child.Equals(terminated.ActorRef))
+                    {
+                        //restart and schedule a retry according to the backoff algorithm
+                        _child = Context.Watch(Context.ActorOf(_childProps, _childName));
+                        ScheduleRetry();
+                    }
+                })
+                .With<PersistentBackoffProtocol.Sent>(sent => {
+                    UnMonitorMessage(sent);
+                    backoff.Reset();
+                })
+                .With<GetCurrentChild>(() => {
+                    Sender.Tell(new CurrentChild(_child));
+                })
+                .Default(m => {
+                    var trackedMsg = MonitorMessage(message, Sender);
+                    if (!backoff.IsStarted()) _child.Forward(trackedMsg);
+                    if (backoff.IsStarted() && retryScheduled == false) ScheduleRetry();
+                }).WasHandled;
         }
 
         private void ScheduleRetry()
