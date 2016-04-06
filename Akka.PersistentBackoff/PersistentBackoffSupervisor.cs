@@ -43,6 +43,7 @@ namespace Akka.PersistentBackoff {
 
         #endregion
 
+        [Serializable]
         private class BufferState {
             public BufferState(List<PersistentBackoffProtocol.TrackedMsg> buffer = null)
             {
