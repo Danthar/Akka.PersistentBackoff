@@ -1,5 +1,7 @@
 # Akka.PersistentBackoff
 
+Targets Akka 1.0.6
+
 This is a small project that integrates a PersistentActor with a backoff supervisor.
 
 It employs an AtLeastOnce Delivery mechanism. 
