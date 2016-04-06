@@ -3,7 +3,7 @@
 # Fake directories
 src/.build/**
 
-
+.vs
 
 #GitExtensions
 us.stackdump
