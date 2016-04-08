@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Akka.Actor;
+using Akka.Dispatch.SysMsg;
 using Akka.Event;
 using Akka.Persistence;
 
@@ -9,7 +10,7 @@ namespace Akka.PersistentBackoff {
     /// <summary>
     /// Actor used to supervise actors with ability to restart them after back-off timeout occurred. 
     /// </summary>
-    public class PersistentBackoffSupervisor : PersistentActor
+    public class PersistentBackoffSupervisor : ReceivePersistentActor
     {
         #region Messages
 
@@ -73,9 +74,9 @@ namespace Akka.PersistentBackoff {
         private IBackoffStrategy backoff;
 
         private bool retryScheduled;
+        private int _eventsSinceLastSnapshot = 0;
 
         private string persistenceId;
-
         public override string PersistenceId { get { return persistenceId; } }
 
         //buffer for messages which we are currently handling
@@ -83,12 +84,13 @@ namespace Akka.PersistentBackoff {
 
         public PersistentBackoffSupervisor(string persistenceId, Props childProps, string childName, IBackoffStrategy backoff)
         {
-         
             this.persistenceId = persistenceId;
             _childProps = childProps;
             _childName = childName;
             this.backoff = backoff;
             State = new BufferState();
+
+            Initialise();
         }
 
         protected override SupervisorStrategy SupervisorStrategy()
@@ -104,45 +106,66 @@ namespace Akka.PersistentBackoff {
             StartChildActor();
             base.PreStart();
         }
-        
-        protected override bool ReceiveRecover(object message) {
-            BufferState state;
-            return message.Match()
-                .With<SnapshotOffer>(offer => {
-                    if ((state = ((SnapshotOffer) message).Snapshot as BufferState) != null)
-                        State = state;
-                })
-                .With<RecoveryCompleted>(FlushBuffer)
-                .WasHandled;
-        }
 
-        protected override bool ReceiveCommand(object message) {
-            return message.Match()
-                .With<SaveSnapshotSuccess>(() => 
-                    { })
-                .With<SaveSnapshotFailure>((failure) => 
-                    Context.GetLogger().Error("Error storing snapshot: {0}", failure.Cause.GetBaseException().Message))
-                .With<Tick>(FlushBuffer)
-                .With<Terminated>(terminated => {
-                    if (_child != null && _child.Equals(terminated.ActorRef))
-                    {
-                        //restart and schedule a retry according to the backoff algorithm
-                        _child = Context.Watch(Context.ActorOf(_childProps, _childName));
-                        ScheduleRetry();
-                    }
-                })
-                .With<PersistentBackoffProtocol.Sent>(sent => {
-                    UnMonitorMessage(sent);
+        public void Initialise() {
+            #region recovery
+            Recover<PersistentBackoffProtocol.Sent>(s => UpdateState(s));
+            Recover<PersistentBackoffProtocol.TrackedMsg>(s => UpdateState(s));
+            Recover<SnapshotOffer>(s => {
+                BufferState state;
+                if ((state = s.Snapshot as BufferState) != null)
+                    State = state;
+            });
+            Recover<RecoveryCompleted>(_ => FlushBuffer());
+            #endregion
+
+            #region management
+
+            Command<Tick>(s => FlushBuffer());
+            Command<Terminated>(terminated => {
+                if (_child != null && _child.Equals(terminated.ActorRef)) {
+                    //restart and schedule a retry according to the backoff algorithm
+                    _child = Context.Watch(Context.ActorOf(_childProps, _childName));
+                    ScheduleRetry();
+                }
+            });
+            Command<GetCurrentChild>(_ => Sender.Tell(new CurrentChild(_child)));
+
+            Command<SaveSnapshotSuccess>(saved => {
+                DeleteMessages(saved.Metadata.SequenceNr);
+                DeleteSnapshots(new SnapshotSelectionCriteria(saved.Metadata.SequenceNr-1,saved.Metadata.Timestamp));
+                Context.GetLogger().Debug("Snapshot saved");
+            });
+
+            #endregion
+
+            Command<PersistentBackoffProtocol.Sent>(sent => {
+                Persist(sent, s => {
+                    UpdateState(sent);
                     backoff.Reset();
-                })
-                .With<GetCurrentChild>(() => {
-                    Sender.Tell(new CurrentChild(_child));
-                })
-                .Default(m => {
-                    var trackedMsg = MonitorMessage(message, Sender);
+                    if (++_eventsSinceLastSnapshot % 10 == 0)
+                    {
+                        SaveSnapshot(State);
+                    }
+                });
+            });
+
+            Command<PersistentBackoffProtocol.Shutdown>(s => Context.Stop(Self));
+            
+            CommandAny(message => {
+                //this here is a big sign that you should always explicitly model messages you send to your persistenct actor.
+                //CommandAny should be avoided because it means you need to handle every PersistenceMessage explicitly
+                if (message is IPersistenceMessage)
+                    return;
+
+                var trackedMsg = new PersistentBackoffProtocol.TrackedMsg(message, Sender);
+
+                Persist(trackedMsg, (t) => {
+                    UpdateState(trackedMsg);
                     if (!backoff.IsStarted()) _child.Forward(trackedMsg);
                     if (backoff.IsStarted() && retryScheduled == false) ScheduleRetry();
-                }).WasHandled;
+                });
+            });
         }
 
         private void ScheduleRetry()
@@ -166,18 +189,12 @@ namespace Akka.PersistentBackoff {
             retryScheduled = false;
         }
 
-        private PersistentBackoffProtocol.TrackedMsg MonitorMessage(object message, IActorRef sender) {
-            var trackedMsg = new PersistentBackoffProtocol.TrackedMsg(message, sender);
-            State = State.Add(trackedMsg);
-            SaveSnapshot(State);
-            return trackedMsg;
+        private void UpdateState(PersistentBackoffProtocol.Sent sent) {
+            State = State.Remove(sent.Id);
         }
 
-        private void UnMonitorMessage(PersistentBackoffProtocol.Sent sent) {
-            State = State.Remove(sent.Id);
-            DeleteSnapshots(SnapshotSelectionCriteria.Latest);
-            if(State.Buffer.Any())
-                SaveSnapshot(State);
+        private void UpdateState(PersistentBackoffProtocol.TrackedMsg msg) {
+            State = State.Add(msg);
         }
     }
 }

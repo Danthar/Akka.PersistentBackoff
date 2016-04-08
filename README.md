@@ -1,6 +1,6 @@
 # Akka.PersistentBackoff
 
-Targets Akka 1.0.6
+Targets Akka 1.0.7
 
 This is a small project that integrates a PersistentActor with a backoff supervisor.
 
@@ -11,3 +11,5 @@ based endpoints.
 
 The exponential backoff supervisor ensures that when communication with a remote endpoint fails, it wont hammer it with requests.
 The persistent part ensures that messages buffered will survive process restarts.
+
+Its also a testbed for me to play with persistence.

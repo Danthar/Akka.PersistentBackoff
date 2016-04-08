@@ -10,8 +10,8 @@ namespace Akka.PersistentBackoff {
                 var command = tracked.Msg as string;
 
                 //simulate a failure after 5 messages
-                if(received == 5)
-                    throw new Exception("Boom");
+//                if(received == 5)
+//                    throw new Exception("Boom");
 
                 Console.WriteLine($"Received message : {command}");
                 received++;

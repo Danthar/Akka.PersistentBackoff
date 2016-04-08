@@ -29,5 +29,7 @@ namespace Akka.PersistentBackoff {
                 Id = id;
             }
         }
+
+        public sealed class Shutdown {}
     }
 }
